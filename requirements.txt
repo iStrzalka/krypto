@@ -1,0 +1,8 @@
+flask
+flask_sqlalchemy
+plotly
+pandas
+networkx
+numpy
+plotly
+pycryptodome

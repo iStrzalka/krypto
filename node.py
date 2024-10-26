@@ -2,63 +2,30 @@ import socket
 import threading
 import sys
 
-from time import sleep
-from main import BlockChain, Wallet
+from defaults import *
+from blockchain import BlockChain
 
 import json
 
-blockchain = None
-known_peers = []
-my_port = 5000
-host = '127.0.0.1'
+class P2P:
+    def __init__(self, host, port, init):
+        self.host = host
+        self.port = port
+        self.known_peers = []
+        self.blockchain = BlockChain() if init else None
+        self.wallet = None
+        self.server_socket = None
+        self.running = True
 
-def broadcast(prev_sent_to, broadcast_data):
-    sent_to = prev_sent_to + [my_port]
-    edges = []
-    for port in known_peers:
-        if port in sent_to:
-            continue
-        edges.append((my_port, port))
-        conn = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        conn.connect(('127.0.0.1', port))
-        sent_to.append(port)
-        conn.send(json.dumps({
-            "type": "broadcast",
-            "data": broadcast_data,
-            "already_seen_by_ports": sent_to
-        }).encode('utf-8'))
-
-        data = conn.recv(1024)
-
-        # Zakłada że otrzyma "type" : "broadcast-recv"
-        message = json.loads(data.decode('utf-8'))
-        if message['type'] == 'broadcast-recv':
-            sent_to = message['already_seen_by_ports']
-            edges.extend(message['edges'])
-        conn.close()
-
-    return sent_to, edges
-    
-
-def handle_peer_connection(conn, addr):
-    (host, port) = addr
-    while True:
+    def handle_peer_connection(self, conn, addr):
         try:
-            data = conn.recv(1024)
-            if not data:
-                break
-            # Zakłada że otrzymane dane są w formacie JSON
-            # Zakłada że dane będą mniejsze niż 1024 bajty
-            message = json.loads(data.decode('utf-8'))
-            # print(message)
+            message = json.loads(conn.recv(1024).decode('utf-8'))
             if message['type'] == 'hello':
-                # Zakłada że conajmniej jedna z dwóch stron ma blockchain
-                if message['port'] not in known_peers:
-                    known_peers.append(message['port'])
-                global blockchain
-                if blockchain is None:
-                    blockchain = BlockChain()
-                    blockchain.restore(message['blockchain'])
+                if message['port'] not in self.known_peers:
+                    self.known_peers.append(message['port'])
+                if self.blockchain is None:
+                    self.blockchain = BlockChain()
+                    self.blockchain.restore(message['blockchain'])
                     conn.send(json.dumps({
                         "type": "hello-recv",
                         "port": my_port,
@@ -69,98 +36,157 @@ def handle_peer_connection(conn, addr):
                         "type": "hello",
                         "port": my_port,
                         "send_back" : True,
-                        "blockchain": blockchain.to_dict()
+                        "blockchain": self.blockchain.to_dict()
                     }).encode('utf-8'))
 
             if message['type'] == 'broadcast':
-                sent_to, edges = broadcast(message['already_seen_by_ports'], message['data'])
+                sent_to, edges = self.broadcast(message['ports_visited'], message['data'])
                 if message['data']['type'] == 'new_block':
-                    blockchain.generate_next_block(message['data'])
+                    self.blockchain.generate_next_block(message['data'])
                 conn.send(json.dumps({
                     "type": "broadcast-recv",
-                    "already_seen_by_ports": sent_to,
+                    "ports_visited": sent_to,
                     "edges" : edges
                 }).encode('utf-8'))    
-    
+
+            if message['type'] == 'ping':
+                conn.send(json.dumps({
+                    "type": "pong"
+                }).encode('utf-8'))
+
+            if message['type'] == 'tree':
+                sent_to, edges = self.broadcast([], {"type": "tree"})
+                conn.send(json.dumps({
+                    "type": "tree-recv",
+                    "edges" : edges,
+                    "ports_visited": sent_to
+                }).encode('utf-8'))
+
+            if message['type'] == 'request_blockchain':
+                if self.blockchain is not None:
+                    conn.send(json.dumps({
+                        "type": "send_blockchain",
+                        "blockchain": self.blockchain.to_dict()
+                    }).encode('utf-8'))
+                else:
+                    conn.send(json.dumps({
+                        "type": "send_blockchain",
+                        "blockchain": None
+                    }).encode('utf-8'))
         except:
-            break
-    conn.close()
+            pass
+        conn.close()
 
-def server_loop(host, port):
-    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server_socket.bind((host, port))
 
-    server_socket.listen(5)
-    while True:
-        conn, addr = server_socket.accept()  
-        threading.Thread(target=handle_peer_connection, args=(conn, addr)).start()
+    def broadcast(self, previously_sent_to, data):
+        sent_to = previously_sent_to + [self.port]
+        edges = []
+        for peer in self.known_peers:
+            edges.append([self.port, peer])
+            if peer in sent_to:
+                continue
+            try:
+                conn = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                conn.connect((self.host, peer))
+                conn.send(json.dumps({
+                    "type": "broadcast",
+                    "ports_visited": sent_to,
+                    "data": data
+                }).encode('utf-8'))
+                
+                recv_data = conn.recv(1024)
 
-if __name__ == "__main__":
-    # node port [optional start]
-    my_port = int(sys.argv[1])
-    if len(sys.argv) == 3:
-        blockchain = BlockChain()
+                message = json.loads(recv_data.decode('utf-8'))
+                sent_to = message['ports_visited']
+                for edge in message['edges']:
+                    edges.append(edge)
+                conn.close()
+            except Exception as e:
+                print(e)
+                break
+        return sent_to, edges
     
-    print(f"Client P2P nasłuchuje na {host}:{my_port}")
-    threading.Thread(target=server_loop, args=(host, my_port)).start()
-    
-    wallet = None
+    def server_loop(self):
+        print("Server listens on {}:{}".format(self.host, self.port))
+        self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
-    while True:
-        option = input("connect port/initialize( wallet)/inspect( wallet)/new( block)/exit/tree/show( entire blockchain) : ")
-        if option.startswith("connect"):
-            other_port = int(option.split()[1])
-            if other_port not in known_peers:
-                known_peers.append(other_port)
+        self.server_socket.bind((self.host, self.port))
+        self.server_socket.listen(5)
+
+        try:
+            while self.running:
+                try:
+                    self.server_socket.settimeout(1)
+                    conn, addr = self.server_socket.accept()
+                    threading.Thread(target=self.handle_peer_connection, args=(conn, addr)).start()
+                except socket.timeout:
+                    continue
+                except Exception as e:
+                    print(e)
+                    break
+        finally:
+            self.server_socket.close()
+
+    def hello(self, other_port):
+        try:
             conn = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            conn.connect((host, other_port))
+            conn.connect((self.host, other_port))
             conn.send(json.dumps({
                 "type": "hello",
-                "port": my_port,
-                "blockchain": "None" if blockchain is None else blockchain.to_dict()
+                "port": self.port,
+                "blockchain": "None" if self.blockchain is None else self.blockchain.to_dict()
             }).encode('utf-8'))
+            self.known_peers.append(other_port)
             data = conn.recv(1024)
             message = json.loads(data.decode('utf-8'))
             if message['send_back']:
-                blockchain = BlockChain()                
-                blockchain.restore(message['blockchain'])
+                self.blockchain = BlockChain()
+                self.blockchain.restore(message['blockchain'])
             conn.close()
-        elif option == "initialize":
-            if wallet is None:
-                wallet = Wallet()
-                print("Portfel zainicjalizowany")
-            else:
-                print("Portfel już zainicjalizowany")
-        elif option == "inspect":
-            if wallet is not None:
-                print(wallet.identity)
-            else:
-                print("Portfel nie został zainicjalizowany")
-        elif option == "new":
-            if wallet is not None:
-                if blockchain is not None:
-                    data = {
-                        "sender": wallet.identity,
-                        "receiver": "0x0",
-                        "amount": 10
-                    }
-                    blockchain.generate_next_block(data)
-                    broadcast([], {"type": "new_block", "data": data})
-                else:
-                    print("Brak blockchaina")
-            else:
-                print("Portfel nie został zainicjalizowany")
-        elif option == "exit":
-            break
-        elif option == "tree":
-            _, edges = broadcast([], {"type" : "tree"})
-            print(edges)
-        elif option == "show":
-            if blockchain is not None:
-                print(json.dumps(blockchain.to_dict(), indent=4))
-        else:
-            print("Nieznana komenda")
-            continue
-    
-    sys.exit(0)
+        except:
+            pass
 
+
+    def handle_server_commands(self):
+        while self.running:
+            command = input()
+            if command == "exit":
+                break
+            if command.startswith("connect"):
+                other_port = int(command.split()[1])
+                self.hello(other_port)
+            if command == "show":
+                if self.blockchain is not None:
+                    print(json.dumps(self.blockchain.to_dict(), indent=4))
+                else:
+                    print("Blockchain is empty")
+            if command == "tree":
+                self.tree()
+                
+
+    def run(self):
+        t = threading.Thread(target=self.server_loop)
+        t.start()
+
+        self.handle_server_commands()
+        
+        print("Closing server")
+        self.running = False
+        t.join()
+
+
+if __name__ == '__main__':
+    host = DEFAULT_HOST
+    my_port = DEFAULT_PORT
+    init = False
+
+    if len(sys.argv) >= 2:
+        my_port = int(sys.argv[1])
+    if len(sys.argv) == 3:
+        init = True
+
+    print(my_port)
+
+    p2p = P2P(host, my_port, init)
+    p2p.run()
