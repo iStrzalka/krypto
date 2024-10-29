@@ -17,6 +17,7 @@ from defaults import *
 import json
 
 host = DEFAULT_HOST
+RECV_BUFFER = 16384
 
 app = Flask(__name__)
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///krypto_wallet.db'
@@ -47,7 +48,7 @@ def get_graph(connected_port):
                 "data": {"type": "tree"}
             }).encode('utf-8'))
 
-            data = conn.recv(1024)
+            data = conn.recv(RECV_BUFFER)
 
             message = json.loads(data.decode('utf-8'))
 
@@ -124,7 +125,7 @@ def wallet():
         if request.form['type'] == 'create':
             name = request.form['name']
             balance = request.form['balance']
-            private_key = RSA.generate(1024, Crypto.Random.new().read)
+            private_key = RSA.generate(4096, Crypto.Random.new().read)
             public_key = private_key.publickey()
 
             encoded_private_key = base64.b64encode(private_key.exportKey(format='DER')).decode('utf-8')
@@ -134,15 +135,94 @@ def wallet():
             db.session.add(wallet)
             db.session.commit()
         if request.form['type'] == 'select':
-            session['wallet'] = int(request.form['wallet'])           
+            session['wallet'] = int(request.form['wallet'])          
+        if request.form['type'] == 'send_wallet':
+            if session.get('wallet', None) is not None:
+                send_from = KryptoWallet.query.filter_by(id=session['wallet']).first()
+                send_to = KryptoWallet.query.filter_by(id=request.form['wallet']).first()
+                print(send_from, send_to)
+                amount = float(request.form['amount'])
+                w1, w2 = Wallet(), Wallet()
+                w1.decode({'private_key': send_from.private_key, 'public_key': send_from.public_key})
+                w2.decode({'private_key': send_to.private_key, 'public_key': send_to.public_key})
+                signature = w1.sign(f"{send_from.public_key}{send_to.public_key}{amount}")
+                
+                try:
+                    conn = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    conn.connect((host, session['port']))
+                    conn.send(json.dumps({
+                        "type": "add_transaction",
+                        "sender": w1.identity,
+                        "recipient": w2.identity,
+                        "amount": amount,
+                        "signature": signature
+                    }).encode('utf-8'))
+                    data = conn.recv(RECV_BUFFER)
+                    message = json.loads(data.decode('utf-8'))
+                    if message['success']:
+                        send_from.balance -= amount
+                        send_to.balance += amount
+                        db.session.commit()
+                except Exception as e:
+                    print(e)
+                    error = "Could not send transaction"
+                    return url_for("wallet", error=error)
+        if request.form['type'] == 'mine':
+            if session.get('wallet', None) is not None:
+                miner = KryptoWallet.query.filter_by(id=session['wallet']).first()
+                w = Wallet()
+                w.decode({'private_key': miner.private_key, 'public_key': miner.public_key})
+                try:
+                    conn = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    conn.connect((host, session['port']))
+                    conn.send(json.dumps({
+                        "type": "mine",
+                        "miner": w.identity
+                    }).encode('utf-8'))
+                    data = conn.recv(RECV_BUFFER)
+                    message = json.loads(data.decode('utf-8'))
+                    if message['success']:
+                        miner.balance += 50
+                        db.session.commit()
+                except Exception as e:
+                    print(e)
+                    error = "Could not mine"
+                    return url_for("wallet", error=error)
+                
 
     wallets = KryptoWallet.query.all()
+    identities = []
+    for wallet in wallets:
+        w = Wallet()
+        w.decode({'private_key': wallet.private_key, 'public_key': wallet.public_key})
+        identities.append(w.identity)
     if session.get('wallet', None) is not None:
         wallet = KryptoWallet.query.filter_by(id=session['wallet']).first()
     else:
         wallet = -1
 
-    return render_template('wallet.html', wallets=wallets, active_wallet=wallet)
+    transactions = []
+    try:
+        conn = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        conn.connect((host, session['port']))
+
+        conn.send(json.dumps({
+            "type": "request_blockchain_transactions"
+        }).encode('utf-8'))
+
+        data = conn.recv(RECV_BUFFER)
+        
+        message = json.loads(data.decode('utf-8'))
+        transactions = message['transactions']
+        transactions = [json.dumps(transaction, indent=4) for transaction in transactions]
+    except Exception as e:
+        print(e)
+        error = "Could not retrieve transactions"
+        return url_for("wallet", error=error)
+    
+    print(transactions)
+
+    return render_template('wallet.html', wallets=wallets, active_wallet=wallet, transactions=transactions, identities=identities)
 
 
 @app.route('/blockchain')
@@ -157,10 +237,11 @@ def blockchain_html():
             "type": "request_blockchain"
         }).encode('utf-8'))
 
-        data = conn.recv(1024)
+        data = conn.recv(RECV_BUFFER)
         
         message = json.loads(data.decode('utf-8'))
         blockchain = message['blockchain']
+        blockchain = [json.dumps(block, indent=4) for block in blockchain]
     except Exception as e:
         print(e)
         error = "Could not retrieve blockchain"
@@ -185,7 +266,7 @@ def home(error=None):
             conn.send(json.dumps({
                 "type": "ping"
             }).encode('utf-8'))
-            conn.recv(1024)
+            conn.recv(RECV_BUFFER)
             conn.close()
             session['port'] = int(port)
         except:

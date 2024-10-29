@@ -10,45 +10,95 @@ import binascii
 import base64
 
 class Block:
-    def __init__(self, index, prev_hash, block_data, timestamp = datetime.datetime.now()):
+    def __init__(self, index, prev_hash, block_data, transactions = [], timestamp = datetime.datetime.now(), nonce = 0):
         self.index = index
         self.block_data = block_data
         self.prev_hash = prev_hash
+        self.transactions = transactions
         self.timestamp = timestamp
+        self.nonce = 0
         self.my_hash = self.hash_block()
 
 
     def hash_block(self):
-        hashed_block = "{}{}{}{}".format(self.index, self.prev_hash, self.block_data, self.timestamp)
+        hashed_block = str(self.index) + str(self.block_data) + str(self.prev_hash) + str(self.transactions)+ str(self.timestamp) + str(self.nonce)
         return hashlib.sha256(hashed_block.encode()).hexdigest()
     
+
+    def mine_block(self, difficulty):
+        while self.my_hash[:difficulty] != "0" * difficulty:
+            self.nonce += 1
+            self.my_hash = self.hash_block()
+
+
     def to_dict(self):
         return {
             "index": self.index,
             "data": self.block_data,
             "previous_hash": self.prev_hash,
+            "transactions": [transaction.to_dict() for transaction in self.transactions],
             "timestamp": self.timestamp.isoformat(),
             "hash": self.my_hash
         }
     
+class Transaction:
+    def __init__(self, sender, recipient, amount, signature):
+        self.sender = sender
+        self.recipient = recipient
+        self.amount = amount
+        self.signature = signature
+
+
+    def to_dict(self):
+        return {
+            "sender": self.sender,
+            "recipient": self.recipient,
+            "amount": self.amount,
+            "signature": self.signature
+        }
+
+
+    def __str__(self):
+        return f"{self.sender} -> {self.recipient} : {self.amount} KryptoCoins, Signature: {self.signature}"
+    
+
 
 class BlockChain:
-    def __init__(self):
-        self.chain = [Block(0, "0", "Genesis Block")]     
+    def __init__(self, difficulty = 1):
+        self.coinbase = Wallet()     
+        self.difficulty = difficulty
+        self.current_transactions = []
+        self.chain = [Block(0, "0", "Genesis Block", [Transaction("0", self.coinbase.identity, 50, "")])]
 
-    def restore(self, chain):
-        self.chain = [Block(block['index'], block['previous_hash'], block['data'], datetime.datetime.fromisoformat(block['timestamp'])) for block in chain]
+
+    def restore(self, chain, coinbase):
+        self.coinbase.decode(coinbase)
+        self.chain = [Block(block['index'],
+                            block['previous_hash'],
+                            block['data'],
+                            [Transaction(transation['sender'],
+                                          transation['recipient'],
+                                          transation['amount'],
+                                          transation['signature']) for transation in block['transactions']],        
+                            datetime.datetime.fromisoformat(block['timestamp']),
+                    ) for block in chain]
+
 
     def get_latest_block(self):
         return self.chain[-1]
-   
-    def generate_next_block(self, data):
-        prev_block = self.get_latest_block()
-        next_index = prev_block.index + 1
-        next_prev_hash = prev_block.my_hash
-        next_block = Block(next_index, next_prev_hash, data)
-        self.add_block(next_block)
-        return next_block
+    
+
+    def add_transaction(self, transaction):
+        self.current_transactions.append(transaction)
+
+
+    def mine(self, miner):
+        new_block = Block(self.get_latest_block().index + 1, self.get_latest_block().my_hash, "Block Data", self.current_transactions)
+        new_block.mine_block(self.difficulty)
+        self.current_transactions = [Transaction(self.coinbase.identity, miner, 50, self.coinbase.sign("50"))]
+        self.chain.append(new_block)
+        return new_block
+
 
     def is_valid_new_block(self, new_block, prev_block):
         if prev_block.index + 1 != new_block.index:
@@ -73,7 +123,7 @@ class BlockChain:
 
 class Wallet:
     def __init__(self):
-        self._private_key = RSA.generate(1024, Crypto.Random.new().read)
+        self._private_key = RSA.generate(4096, Crypto.Random.new().read)
         self._public_key = self._private_key.publickey()
         self._signer = PKCS1_v1_5.new(self._private_key)
     
@@ -94,10 +144,19 @@ class Wallet:
     def identity(self):
         return binascii.hexlify(self._public_key.exportKey(format='DER')).decode('ascii')
     
+
     def sign(self, message):
         h = SHA.new(message.encode('utf8'))
         return binascii.hexlify(self._signer.sign(h)).decode('ascii')
     
+
+    def to_dict(self):
+        return {
+            "private_key": base64.b64encode(self._private_key.exportKey(format='DER')).decode('utf-8'),
+            "public_key": base64.b64encode(self._public_key.exportKey(format='DER')).decode('utf-8')
+        }
+
+
 
 if __name__ == '__main__':
     blockchain = BlockChain()

@@ -49,13 +49,31 @@
         <input type="number" name="balance" placeholder="Balance">
         <button type="submit" class="btn btn-primary">Create wallet</button>
     </form>
+
+
+    <form button="submit" action="/wallet" method="POST">
+      <input type="hidden" name="type" value="mine">
+      <button type="submit" class="btn btn-primary">Mine this block</button>
+    </form>    
 </div>
+
+
     
 {% if error %}
     <div class="alert alert-danger" role="alert">
         {{ error }}
     </div>
 {% endif %} 
+
+<button class="collapsible" style="background-color: #555;">Transactions</button>
+<div class="content">
+</div>
+{% for transaction in transactions %}
+<button class="collapsible">Transaction {{ loop.index }}</button>
+<div class="content">
+  <pre>{{ transaction }}</pre>
+</div>
+{% endfor %}
 
 {% for wallet in wallets %}
 {% if active_wallet == wallet %}
@@ -69,11 +87,21 @@
     <p>Balance : {{ wallet.balance }}</p>
     <p>Public key : {{ wallet.public_key }}</p>
     <p>Private key : {{ wallet.private_key }}</p>
+    <p>Identity : {{ identities[loop.index - 1] }}</p>
+
+    {% if active_wallet != wallet %}
     <form action="/wallet" method="POST">
         <input type="hidden" name="type" value="select">
         <input type="hidden" name="wallet" value="{{ wallet.id }}">
         <button type="submit" class="btn btn-primary">Select this wallet</button>   
     </form>
+    <form action="/wallet" method="POST">
+      <input type="hidden" name="type" value="send_wallet">
+      <input type="hidden" name="wallet" value="{{ wallet.id }}">
+      <input type="number" name="amount" placeholder="Amount">
+      <button type="submit" class="btn btn-primary">Add transactions</button>   
+    </form>
+  {% endif %}
 </div>
 {% endfor %}
 
