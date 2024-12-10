@@ -3,7 +3,8 @@ import threading
 import sys
 
 from defaults import *
-from blockchain import BlockChain, Transaction
+import datetime
+from blockchain import BlockChain, Transaction, Block
 
 import json
 
@@ -30,7 +31,6 @@ class P2P:
                 if self.blockchain is None:
                     self.blockchain = BlockChain()
                     self.blockchain.restore(message['blockchain'])
-                    self.blockchain.coinbase.decode(message['blockchain_coinbase'])
                     conn.send(json.dumps({
                         "type": "hello-recv",
                         "port": my_port,
@@ -41,24 +41,35 @@ class P2P:
                         "type": "hello",
                         "port": my_port,
                         "send_back" : True,
-                        "blockchain": self.blockchain.to_dict(),
-                        "blockchain_coinbase": self.blockchain.coinbase.to_dict()
+                        "blockchain": self.blockchain.to_dict()
                     }).encode('utf-8'))
 
             if message['type'] == 'broadcast':
                 sent_to, edges = self.broadcast(message['ports_visited'], message['data'])
+                output = False
                 if message['data']['type'] == 'new_block':
-                    self.blockchain.mine(message['data']['miner'])
+                    print("Received new block")
+                    block_data = message['data']['block']
+                    block = Block(block_data['index'],
+                                block_data['previous_hash'],
+                                block_data['data'],
+                                [Transaction(transation['sender'],
+                                                transation['recipient'],
+                                                transation['amount'],
+                                                transation['signature']) for transation in block_data['transactions']],        
+                                datetime.datetime.fromisoformat(block_data['timestamp']))
+                    output = self.blockchain.add_block(block)
                 if message['data']['type'] == 'add_transaction':
                     transaction = Transaction(message['data']['transaction']['sender'], message['data']['transaction']['recipient'], message['data']['transaction']['amount'], message['data']['transaction']['signature'])
-                    self.blockchain.add_transaction(transaction)
+                    output = self.blockchain.add_transaction(transaction)
                 if message['data']['type'] == 'mine':
-                    self.blockchain.mine(message['data']['miner'])
+                    output = self.blockchain.mine(message['data']['miner'])
 
                 conn.send(json.dumps({
                     "type": "broadcast-recv",
                     "ports_visited": sent_to,
-                    "edges" : edges
+                    "edges" : edges,
+                    "result": str(output)
                 }).encode('utf-8'))    
 
             if message['type'] == 'ping':
@@ -103,8 +114,8 @@ class P2P:
 
             if message['type'] == 'mine':
                 if self.blockchain is not None:
-                    self.blockchain.mine(message['miner'])
-                    self.broadcast([], {"type": "new_block", "miner": message['miner']})
+                    block = self.blockchain.mine(message['miner'])
+                    self.broadcast([], {"type": "new_block", "block": block.to_dict()})
                     conn.send(json.dumps({
                         "type": "mine",
                         "success": True
@@ -113,8 +124,7 @@ class P2P:
                     conn.send(json.dumps({
                         "type": "mine",
                         "success": False
-                    }).encode('utf-8'))
-                
+                    }).encode('utf-8'))            
 
             if message['type'] == 'request_blockchain_transactions':
                 if self.blockchain is not None:
@@ -129,6 +139,7 @@ class P2P:
                     }).encode('utf-8'))
         except Exception as e:
             print('handle_peer_connection', m_type, e)
+            raise e
         conn.close()
 
 
@@ -191,15 +202,14 @@ class P2P:
             conn.send(json.dumps({
                 "type": "hello",
                 "port": self.port,
-                "blockchain": "None" if self.blockchain is None else self.blockchain.to_dict(),
-                "blockchain_coinbase": "None" if self.blockchain is None else self.blockchain.coinbase.to_dict()
+                "blockchain": "None" if self.blockchain is None else self.blockchain.to_dict()
             }).encode('utf-8'))
             self.known_peers.append(other_port)
             data = conn.recv(RECV_BUFFER)
             message = json.loads(data.decode('utf-8'))
             if message['send_back']:
                 self.blockchain = BlockChain()
-                self.blockchain.restore(message['blockchain'], message['blockchain_coinbase'])
+                self.blockchain.restore(message['blockchain'])
             conn.close()
         except Exception as e:
             print('hello', e)
@@ -217,7 +227,6 @@ class P2P:
             if command == "show":
                 if self.blockchain is not None:
                     print(json.dumps(self.blockchain.to_dict(), indent=4))
-                    print(json.dumps(self.blockchain.coinbase.to_dict(), indent=4))
                 else:
                     print("Blockchain is empty")
             if command == "tree":

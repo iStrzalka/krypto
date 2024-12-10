@@ -120,8 +120,8 @@ def get_graph(connected_port):
 
 
 @app.route('/wallet', methods=['GET', 'POST'])
-def wallet():
-    if request.method == 'POST':
+def wallet_html(error = None):
+    if request.method == 'POST' and error is None:
         if request.form['type'] == 'create':
             name = request.form['name']
             balance = request.form['balance']
@@ -142,6 +142,14 @@ def wallet():
                 send_to = KryptoWallet.query.filter_by(id=request.form['wallet']).first()
                 print(send_from, send_to)
                 amount = float(request.form['amount'])
+                
+                print(send_from.balance, amount)
+                if send_from.balance < amount:
+                    error = "Insufficient funds"
+                    return wallet_html(error=error)
+                if amount <= 0:
+                    error = "Invalid amount"
+                    return wallet_html(error=error)
                 w1, w2 = Wallet(), Wallet()
                 w1.decode({'private_key': send_from.private_key, 'public_key': send_from.public_key})
                 w2.decode({'private_key': send_to.private_key, 'public_key': send_to.public_key})
@@ -218,10 +226,10 @@ def wallet():
     except Exception as e:
         print(e)
         error = "Could not retrieve transactions"
-        return url_for("wallet", error=error)
-    
-    print(transactions)
+        return render_template('wallet.html', wallets=wallets, active_wallet=wallet, transactions=transactions, identities=identities, error=error)
 
+    if error is not None:
+        return render_template('wallet.html', wallets=wallets, active_wallet=wallet, transactions=transactions, identities=identities, error=error)
     return render_template('wallet.html', wallets=wallets, active_wallet=wallet, transactions=transactions, identities=identities)
 
 
