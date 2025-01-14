@@ -8,6 +8,7 @@ from Crypto.Hash import SHA
 from Crypto.Signature import PKCS1_v1_5
 import binascii
 import base64
+from uuid import uuid4
 
 class Block:
     def __init__(self, index, prev_hash, block_data, transactions = [], timestamp = datetime.datetime.now(), nonce = 0):
@@ -16,7 +17,7 @@ class Block:
         self.prev_hash = prev_hash
         self.transactions = transactions
         self.timestamp = timestamp
-        self.nonce = 0
+        self.nonce = nonce
         self.my_hash = self.hash_block()
 
 
@@ -39,15 +40,18 @@ class Block:
             "previous_hash": self.prev_hash,
             "transactions": [transaction.to_dict() for transaction in self.transactions],
             "timestamp": self.timestamp.isoformat(),
-            "hash": self.my_hash
+            "hash": self.my_hash,
+            "nonce": self.nonce
         }
     
 class Transaction:
-    def __init__(self, sender, recipient, amount, signature):
+    def __init__(self, sender, recipient, amount, signature, id=None, timestamp=None):
         self.sender = sender
         self.recipient = recipient
         self.amount = amount
         self.signature = signature
+        self.id = id if id else str(uuid4())
+        self.timestamp = timestamp if timestamp else datetime.datetime.now().isoformat()
 
 
     def to_dict(self):
@@ -55,12 +59,15 @@ class Transaction:
             "sender": self.sender,
             "recipient": self.recipient,
             "amount": self.amount,
-            "signature": self.signature
+            "signature": self.signature,
+            "id": self.id,
+            "timestamp": self.timestamp
         }
 
     def is_valid(self):
         try:
             if self.amount <= 0:
+                print("Invalid Amount")
                 return False
             if self.sender == "coinbase":
                 with open("coinbase.pem", "rb") as f:
@@ -74,14 +81,14 @@ class Transaction:
                 recipent_key = RSA.importKey(binascii.unhexlify(self.recipient))
                 s_pkey = base64.b64encode(key.exportKey(format='DER')).decode('utf-8')
                 r_pkey = base64.b64encode(recipent_key.exportKey(format='DER')).decode('utf-8')
-                hash_message = SHA.new(f"{s_pkey}{r_pkey}{self.amount}".encode('utf8'))
+                hash_message = SHA.new(f"{s_pkey}{r_pkey}{self.amount}{self.id}{self.timestamp}".encode('utf8'))
                 return verifier.verify(hash_message, binascii.unhexlify(self.signature))
         except Exception as e:
             print(e)
             return False
 
     def __str__(self):
-        return f"{self.sender} -> {self.recipient} : {self.amount} KryptoCoins, Signature: {self.signature}"
+        return f"{self.sender} -> {self.recipient} : {self.amount} KryptoCoins, Signature: {self.signature}, ID: {self.id}, Timestamp: {self.timestamp}"
     
 
 
@@ -104,19 +111,33 @@ class BlockChain:
                             [Transaction(transation['sender'],
                                           transation['recipient'],
                                           transation['amount'],
-                                          transation['signature']) for transation in block['transactions']],        
+                                          transation['signature'],
+                                          transation['id'],
+                                          transation['timestamp']) for transation in block['transactions']],        
                             datetime.datetime.fromisoformat(block['timestamp']),
+                            block['nonce']
                     ) for block in chain]
         self.chain = [blocks[0]]
         for block in blocks[1:]:
-            self.add_block(block)
+            output = self.add_block(block)
+            if not output:
+                return False
+        return True
 
     def get_latest_block(self):
         return self.chain[-1]
     
 
     def add_transaction(self, transaction):
+        if not transaction.is_valid():
+            print("Invalid Transaction")
+            return False
+        for transaction in self.current_transactions:
+            if transaction.sender == transaction.sender and transaction.recipient == transaction.recipient:
+                print("Possible Double Spending")
+                return False # Possible Double Spending
         self.current_transactions.append(transaction)
+        return True
 
 
     def mine(self, miner):
@@ -129,7 +150,18 @@ class BlockChain:
         new_block = Block(self.get_latest_block().index + 1, self.get_latest_block().my_hash, "Block Data", self.current_transactions)
         new_block.mine_block(self.difficulty)
         self.current_transactions = []
-        self.chain.append(new_block)
+        return new_block
+
+    def mine_bad_block(self, miner):
+        with open("coinbase.pem", "rb") as f:
+            coinbase = RSA.importKey(f.read())
+            signer = PKCS1_v1_5.new(coinbase)
+            hash_message = SHA.new("Reward Transaction".encode('utf8'))
+            self.current_transactions.insert(0, Transaction("coinbase", miner, 50, binascii.hexlify(signer.sign(hash_message)).decode('ascii')))
+
+        new_block = Block(self.get_latest_block().index + 1, "bad_previous_hash", "Bad Block Data", self.current_transactions)
+        new_block.mine_block(self.difficulty)
+        self.current_transactions = []
         return new_block
 
     def is_valid_new_block(self, new_block, prev_block):
@@ -142,10 +174,16 @@ class BlockChain:
         elif new_block.hash_block() != new_block.my_hash:
             print("Hash Block Error")
             return False
+        has_coinbase_transaction = False
         for transaction in new_block.transactions:
             if not transaction.is_valid():
                 print("Transaction Error")
                 return False
+            if transaction.sender == "coinbase":
+                if has_coinbase_transaction:
+                    print("Duplicate Coinbase Transaction")
+                    return False
+                has_coinbase_transaction = True
         return True
     
 

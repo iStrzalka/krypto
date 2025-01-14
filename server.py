@@ -8,6 +8,8 @@ import socket
 from Crypto.PublicKey import RSA
 import Crypto
 import base64
+from uuid import uuid4
+from datetime import datetime
 
 from blockchain import Wallet
 
@@ -21,6 +23,8 @@ RECV_BUFFER = 16384
 
 app = Flask(__name__)
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///krypto_wallet.db'
+
+transactions = []
 
 db = SQLAlchemy(app)
 
@@ -58,7 +62,7 @@ def get_graph(connected_port):
             ports_visited += message['ports_visited']
         except Exception as e:
             continue
-
+    print(edges)
     G = nx.Graph()
     G.add_edges_from(edges)
 
@@ -121,6 +125,7 @@ def get_graph(connected_port):
 
 @app.route('/wallet', methods=['GET', 'POST'])
 def wallet_html(error = None):
+    global transactions
     if request.method == 'POST' and error is None:
         if request.form['type'] == 'create':
             name = request.form['name']
@@ -153,7 +158,9 @@ def wallet_html(error = None):
                 w1, w2 = Wallet(), Wallet()
                 w1.decode({'private_key': send_from.private_key, 'public_key': send_from.public_key})
                 w2.decode({'private_key': send_to.private_key, 'public_key': send_to.public_key})
-                signature = w1.sign(f"{send_from.public_key}{send_to.public_key}{amount}")
+                transaction_id = len(transactions) + 1
+                timestamp = datetime.now().isoformat()
+                signature = w1.sign(f"{send_from.public_key}{send_to.public_key}{amount}{transaction_id}{timestamp}")
                 
                 try:
                     conn = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -163,7 +170,9 @@ def wallet_html(error = None):
                         "sender": w1.identity,
                         "recipient": w2.identity,
                         "amount": amount,
-                        "signature": signature
+                        "signature": signature,
+                        "id": transaction_id,
+                        "timestamp": timestamp
                     }).encode('utf-8'))
                     data = conn.recv(RECV_BUFFER)
                     message = json.loads(data.decode('utf-8'))
@@ -171,6 +180,16 @@ def wallet_html(error = None):
                         send_from.balance -= amount
                         send_to.balance += amount
                         db.session.commit()
+                    if message['type'] == 'add_transaction_recvt':
+                        ts = message['transactions']
+                        for kw in KryptoWallet.query.all():
+                            kww = Wallet()
+                            kww.decode({'private_key': kw.private_key, 'public_key': kw.public_key})
+                            if kww.identity in ts.keys():
+                                kw.balance += ts[kww.identity]
+                                db.session.commit()
+                        return url_for("wallet", error="Synced transactions")
+
                 except Exception as e:
                     print(e)
                     error = "Could not send transaction"
@@ -192,6 +211,15 @@ def wallet_html(error = None):
                     if message['success']:
                         miner.balance += 50
                         db.session.commit()
+                    if message['type'] == 'mine_recvt':
+                        ts = message['transactions']
+                        for kw in KryptoWallet.query.all():
+                            kww = Wallet()
+                            kww.decode({'private_key': kw.private_key, 'public_key': kw.public_key})
+                            if kww.identity in ts.keys():
+                                kw.balance += ts[kww.identity]
+                                db.session.commit()
+                        return url_for("wallet", error="Synced transactions")
                 except Exception as e:
                     print(e)
                     error = "Could not mine"
@@ -283,7 +311,6 @@ def home(error=None):
 
     fig = get_graph(session['port'])
     plot_html = pio.to_html(fig, full_html=False) 
-
     return render_template('index.html', plot=plot_html, error=error)
 
 if __name__ == '__main__':
